@@ -1,5 +1,10 @@
 package akka
 
+import (
+	"container/list"
+	"sync"
+)
+
 type Message interface {
 	id() string
 }
@@ -12,9 +17,212 @@ type Actor interface {
 type ActorContext interface {
 }
 
+// TODO separate queue structure (one shared queue, multiple queues, etc.)
+// from the selection strategy (how to enqueue, how to dequeue, how to
+// attain a fair schedule)
 type ActorMessageQueue interface {
 	// block until the next message is available
-	nextMessage() (Message, Actor)
+	poll() (Message, Actor)
+
+	// block for shared queue, non-blocking for one for one queue
+	offer(msg Message, actor Actor)
+}
+
+// a single thread-safe queue shared by all actors
+type SharedMessageQueue struct {
+	bufferSize int
+	channel    chan *ActorRuntimeMessage
+}
+
+func NewSharedMessageQueue(bufferSize int) ActorMessageQueue {
+	mq := new(SharedMessageQueue)
+	mq.bufferSize = bufferSize
+	mq.channel = make(chan *ActorRuntimeMessage, bufferSize)
+	return mq
+}
+
+func (this *SharedMessageQueue) poll() (Message, Actor) {
+	next := <-this.channel
+	return next.msg, next.actor
+}
+
+func (this *SharedMessageQueue) offer(msg Message, actor Actor) {
+	this.channel <- &ActorRuntimeMessage{msg, actor}
+}
+
+// TODO implement a fair enough scheduler
+type OneForOneMessageQueue struct {
+	mqs       map[Actor]SingleMQ // TODO better use a LinkedHashMap
+	mqBuilder func() SingleMQ
+
+	ready   chan Actor
+	waiting chan bool
+
+	nextMsg   func() (Message, Actor, bool) // helper generator
+	processed int
+	mutex     *sync.Mutex
+}
+
+func (this *OneForOneMessageQueue) isWaiting() bool {
+	select {
+	case <-this.waiting:
+		return true
+	default:
+		return false
+	}
+}
+
+// helper type for OneForOneMessageQueue, use my existing implementation
+// must be thread-safe : offer() and poll() might run concurrently
+type SingleMQ interface {
+	offer(msg Message)
+	poll() (Message, bool) // must be non-blocking
+	size() int
+}
+
+func DefaultMQBuilder() SingleMQ {
+	return &DefaultSingleMQ{new(sync.Mutex), list.New()}
+}
+
+type DefaultSingleMQ struct {
+	mutex *sync.Mutex
+	queue *list.List
+}
+
+func (this *DefaultSingleMQ) offer(msg Message) {
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+
+	this.queue.PushBack(msg)
+}
+
+func (this *DefaultSingleMQ) poll() (Message, bool) {
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+	if this.queue.Len() == 0 {
+		return nil, false
+	} else {
+		front := this.queue.Front()
+		this.queue.Remove(front)
+		msg, ok := front.Value.(Message)
+		return msg, ok
+	}
+}
+
+func (this *DefaultSingleMQ) size() int {
+	return this.queue.Len()
+}
+
+func NewOneForOneMessageQueue() ActorMessageQueue {
+	mq := new(OneForOneMessageQueue)
+	mq.mqs = make(map[Actor]SingleMQ)
+	mq.mqBuilder = DefaultMQBuilder
+	mq.ready = make(chan Actor)
+	mq.waiting = make(chan bool)
+	mq.nextMsg = nil
+	mq.processed = 0
+	mq.mutex = new(sync.Mutex)
+
+	return mq
+}
+
+func NewOneForOneMessageQueueWithBuilder(mqBuilder func() SingleMQ) ActorMessageQueue {
+	mq := new(OneForOneMessageQueue)
+	mq.mqs = make(map[Actor]SingleMQ)
+	mq.mqBuilder = mqBuilder
+	mq.waiting = make(chan bool)
+	mq.ready = make(chan Actor)
+	mq.nextMsg = nil
+	mq.processed = 0
+	mq.mutex = new(sync.Mutex)
+
+	return mq
+}
+
+func (this *OneForOneMessageQueue) poll() (Message, Actor) {
+	if this.nextMsg == nil {
+		this.nextMsg = this.next()
+	}
+
+	for {
+		msg, actor, ok := this.nextMsg()
+		if ok {
+			this.processed += 1
+			return msg, actor
+		} else {
+			if this.processed > 0 {
+				this.processed = 0
+				this.nextMsg = this.next()
+			} else {
+				// to check if there is really no message
+				this.mutex.Lock()
+				size := this.size()
+				if size > 0 {
+					this.mutex.Unlock()
+					continue
+				} else {
+					// block until any channel is ready
+					this.waiting <- true
+					this.mutex.Unlock()
+
+					<-this.ready
+					this.processed = 0
+					this.nextMsg = this.next()
+				}
+			}
+		}
+	}
+}
+
+// total size of messages (for now)
+func (this *OneForOneMessageQueue) size() int {
+	s := 0
+	for _, mq := range this.mqs {
+		s += mq.size()
+	}
+	return s
+}
+
+// a helper function for poll(). a generator
+func (this *OneForOneMessageQueue) next() func() (Message, Actor, bool) {
+	actors := make([]Actor, len(this.mqs))
+	mqs := make([]SingleMQ, len(this.mqs))
+	i := 0
+	for actor, mq := range this.mqs {
+		actors[i] = actor
+		mqs[i] = mq
+		i += 1
+	}
+
+	j := -1
+	return func() (Message, Actor, bool) {
+		for j += 1; j <= i-1; j += 1 {
+			m, ok := mqs[j].poll()
+			if ok {
+				return m, actors[j], true
+			}
+		}
+		return nil, nil, false
+	}
+}
+
+// non-blocking, nn-boundary
+func (this *OneForOneMessageQueue) offer(msg Message, actor Actor) {
+	if mq, exists := this.mqs[actor]; !exists {
+		q := this.mqBuilder()
+		q.offer(msg)
+		this.mqs[actor] = q
+	} else {
+		mq.offer(msg)
+	}
+
+	this.notify(actor)
+}
+
+func (this *OneForOneMessageQueue) notify(actor Actor) {
+	if this.isWaiting() {
+		this.ready <- actor
+	}
 }
 
 type ActorRuntimePool interface {
@@ -204,7 +412,7 @@ type Dispatcher struct {
 
 func (this *Dispatcher) start() {
 	for !this.stop {
-		msg, actor := this.messageQueue.nextMessage()
+		msg, actor := this.messageQueue.poll()
 		this.runtime.receive(msg, actor)
 	}
 }
