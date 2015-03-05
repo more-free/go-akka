@@ -14,7 +14,77 @@ type Actor interface {
 	//context() ActorContext
 }
 
+// no direct operations. all operations are delegated to ActorRef
+type ActorBehaivor interface {
+	receive(msg Message)
+}
+
+type ActorLifeCycle interface {
+	// lifecycle hook
+	preStart()
+	preRestart()
+	postRestart()
+	preStop()
+	postStop()
+}
+
+type DefaultActorLifeCycle struct{}
+
+func (this *DefaultActorLifeCycle) preStart()    {}
+func (this *DefaultActorLifeCycle) preRestart()  {}
+func (this *DefaultActorLifeCycle) postRestart() {}
+func (this *DefaultActorLifeCycle) preStop()     {}
+func (this *DefaultActorLifeCycle) postStop()    {}
+
+// hold an actor implicitly
+//
+type ActorRef interface {
+	send(msg Message)
+	actorOf(prop Prop) ActorRef
+	// add become(cxt ActorContext) and unbecome(bool discardOld)
+}
+
+type Prop interface {
+	path() string // unique in the same actor system
+	// add other fields here ..
+}
+
 type ActorContext interface {
+	dispatcher() Dispatcher
+	parent() ActorRef
+	children() []ActorRef
+	props() Prop
+	self() ActorRef
+	sender() ActorRef
+	system() ActorSystem
+	stop(actor ActorRef)
+}
+
+type ActorSystem interface {
+	// actor events
+	add(actor *ActorRef)
+	remove(actor *ActorRef)
+
+	// for actor-related events(add, remove, etc.), registered listeners
+	// should be invoked synchronously
+	addListener(listener *ActorEventListener)
+	removeListener(listener *ActorEventListener)
+}
+
+type ActorEvent struct {
+	name string
+}
+
+type ActorAddedEvent struct {
+	ActorEvent
+}
+
+type ActorRemovedEvent struct {
+	ActorEvent
+}
+
+type ActorEventListener interface {
+	do(event *ActorEvent)
 }
 
 // TODO separate queue structure (one shared queue, multiple queues, etc.)
