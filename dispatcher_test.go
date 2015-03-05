@@ -1,18 +1,188 @@
 package akka
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
-// TODO test OneForMoreActorRuntime(Pool)
-// TODO test SharedMessageQueue
-// TODO test OneForOneMessageQueue
 // TODO test Dispatcher
 
+func TestOneForMulActorRuntimePool(t *testing.T) {
+	testForOneActor(t)
+	testForTwoActors(t)
+}
+
+func testForOneActor(t *testing.T) {
+	rtp := NewOneForMulActorRuntimePool(1)
+	msgsCnt := []string{"m1", "m2", "m3", "m4"}
+	msgs := make([]Message, len(msgsCnt))
+	for i, s := range msgsCnt {
+		msgs[i] = &msg{s}
+	}
+
+	sleeper1 := new(sleeper)
+	sleeper1.sleepTime = 200 * time.Millisecond
+	sleeper1.received = make(chan Message, 4)
+
+	rtp.add(sleeper1)
+	rtp.receive(msgs[0], sleeper1)
+
+	isBlock := true
+	blocking := make(chan bool)
+	go func() {
+		assertBoolEquals(t, true, isBlock)
+		<-blocking
+		assertBoolEquals(t, false, isBlock)
+	}()
+
+	// shoud get blocked because there is only one go routine inside runtime pool
+	rtp.receive(msgs[1], sleeper1)
+	isBlock = false
+	blocking <- isBlock
+
+	rtp.receive(msgs[2], sleeper1)
+	rtp.receive(msgs[3], sleeper1)
+
+	for i := 0; i < 4; i += 1 {
+		m := <-sleeper1.received
+		assertStringEquals(t, msgsCnt[i], m.id())
+	}
+
+	rtp.shutdown()
+}
+
+func testForTwoActors(t *testing.T) {
+	rtp := NewOneForMulActorRuntimePool(2)
+	msgsCnt := []string{"m1", "m2", "m3", "m4"}
+	msgs := make([]Message, len(msgsCnt))
+	for i, s := range msgsCnt {
+		msgs[i] = &msg{s}
+	}
+
+	sharedReceived := make(chan Message, 4)
+	sleeper1 := new(sleeper)
+	sleeper1.sleepTime = 50 * time.Millisecond
+	sleeper1.received = sharedReceived
+
+	sleeper2 := new(sleeper)
+	sleeper2.sleepTime = 150 * time.Millisecond
+	sleeper2.received = sharedReceived
+
+	rtp.add(sleeper1)
+	rtp.add(sleeper2)
+	rtp.receive(msgs[0], sleeper1)
+	rtp.receive(msgs[1], sleeper2)
+
+	isBlock := true
+	blocking := make(chan bool)
+	go func() {
+		assertBoolEquals(t, true, isBlock)
+		<-blocking
+		assertBoolEquals(t, false, isBlock)
+	}()
+
+	rtp.receive(msgs[2], sleeper1)
+	isBlock = false
+	blocking <- isBlock
+
+	rtp.receive(msgs[3], sleeper2)
+
+	res := make(map[string]bool)
+	for i := 0; i < len(msgs); i += 1 {
+		m := <-sharedReceived
+		res[m.id()] = true
+	}
+
+	// two sleepers should process all messages
+	assertIntEquals(t, len(msgs), len(res))
+
+	rtp.shutdown()
+}
+
+func TestOneForOneMessageQueue(t *testing.T) {
+	actor1 := new(echor)
+	actor1.received = make(chan Message, 2)
+
+	actor2 := new(echor)
+	actor2.received = make(chan Message, 2)
+
+	mq := NewOneForOneMessageQueue() // with default SingeMQ builder
+	mq.offer(&msg{"m1a1"}, actor1)
+	mq.offer(&msg{"m2a1"}, actor2)
+
+	msgs := make([]Message, 2)
+	actors := make([]Actor, 2)
+
+	m, a := mq.poll()
+	msgs[0] = m
+	actors[0] = a
+
+	m, a = mq.poll()
+	msgs[1] = m
+	actors[1] = a
+
+	// the received message might be out of order, but have to be consistent
+	if strings.EqualFold(msgs[0].id(), "m1a1") {
+		assertBoolEquals(t, true, actors[0] == actor1)
+		assertStringEquals(t, "m2a1", msgs[1].id())
+		assertBoolEquals(t, true, actors[1] == actor2)
+	} else {
+		assertStringEquals(t, "m2a1", msgs[0].id())
+		assertBoolEquals(t, true, actors[0] == actor2)
+		assertBoolEquals(t, true, actors[1] == actor1)
+		assertStringEquals(t, "m1a1", msgs[1].id())
+	}
+
+	// should block
+	isBlock := true
+
+	go func() {
+		time.Sleep(200 * time.Millisecond) // let poll() blocked
+		assertBoolEquals(t, true, isBlock)
+		mq.offer(&msg{"m2a1"}, actor1)
+	}()
+
+	m, a = mq.poll()
+	isBlock = false
+	assertStringEquals(t, "m2a1", m.id())
+}
+
 func TestSharedMessageQueue(t *testing.T) {
-	// TODO
+	// echor does nothing in this test
+	echor := new(echor)
+	echor.received = make(chan Message, 3)
+
+	mq := NewSharedMessageQueue(3)
+	mq.offer(&msg{"m1"}, echor)
+	mq.offer(&msg{"m2"}, echor)
+	mq.offer(&msg{"m3"}, echor)
+	is4thMsgReady := false
+
+	// the 4th message should be blocked until the one of the first three
+	// is consumed
+	go func() {
+		mq.offer(&msg{"m4"}, echor)
+		is4thMsgReady = true
+	}()
+
+	assertBoolEquals(t, false, is4thMsgReady)
+
+	msg, _ := mq.poll()
+	assertStringEquals(t, "m1", msg.id())
+
+	msg, _ = mq.poll()
+	assertStringEquals(t, "m2", msg.id())
+
+	msg, _ = mq.poll()
+	assertStringEquals(t, "m3", msg.id())
+
+	msg, _ = mq.poll()
+	assertStringEquals(t, "m4", msg.id())
+
+	assertBoolEquals(t, true, is4thMsgReady)
 }
 
 func TestDefaultSingleMQ(t *testing.T) {
@@ -106,6 +276,21 @@ func TestOneForOneActorRuntimePool(t *testing.T) {
 }
 
 // helpers
+
+func enableFmtImport() {
+	fmt.Println("")
+}
+
+type sleeper struct {
+	sleepTime time.Duration
+	received  chan Message
+}
+
+func (this *sleeper) receive(msg Message) {
+	time.Sleep(this.sleepTime)
+	this.received <- msg
+}
+
 type echor struct {
 	received chan Message
 }

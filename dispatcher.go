@@ -120,7 +120,6 @@ func (this *SharedMessageQueue) offer(msg Message, actor Actor) {
 	this.channel <- &ActorRuntimeMessage{msg, actor}
 }
 
-// TODO implement a fair enough scheduler
 type OneForOneMessageQueue struct {
 	mqs       map[Actor]SingleMQ // TODO better use a LinkedHashMap
 	mqBuilder func() SingleMQ
@@ -276,7 +275,7 @@ func (this *OneForOneMessageQueue) next() func() (Message, Actor, bool) {
 	}
 }
 
-// non-blocking, nn-boundary
+// non-blocking, no-boundary
 func (this *OneForOneMessageQueue) offer(msg Message, actor Actor) {
 	if mq, exists := this.mqs[actor]; !exists {
 		q := this.mqBuilder()
@@ -296,7 +295,9 @@ func (this *OneForOneMessageQueue) notify(actor Actor) {
 }
 
 type ActorRuntimePool interface {
+	// invoke actor's receive(Message) inside the runtime
 	receive(msg Message, actor Actor)
+
 	add(actor Actor)
 	remove(actor Actor)
 	shutdown()
@@ -345,8 +346,9 @@ type OneForMulActorRuntimePool struct {
 	maxStandings int            // max number of allowed go routines
 	actors       map[Actor]bool // use as an known actor set
 
-	freeWorkers chan ActorRuntime
-	workers     []ActorRuntime
+	freeWorkers   chan ActorRuntime
+	workers       []ActorRuntime
+	activeWorkers int
 }
 
 type SharedActorRuntime struct {
@@ -373,13 +375,14 @@ func NewSharedActorRuntime(freeWorkers chan ActorRuntime) ActorRuntime {
 
 	go func(rt *SharedActorRuntime) {
 		for {
+			// notify runtime pool "I am free", and wait for being invoked
+			rt.freeWorkers <- rt
+
+			// wait for the next message
 			next := <-rt.channel
 			if next.msg != nil && next.actor != nil {
-				rt.receive(next.msg, next.actor)
+				next.actor.receive(next.msg)
 			}
-
-			// notify runtime pool "I am free", and wait for the message
-			rt.freeWorkers <- rt
 		}
 	}(rt)
 
@@ -390,8 +393,9 @@ func NewOneForMulActorRuntimePool(maxStandings int) ActorRuntimePool {
 	rtp := new(OneForMulActorRuntimePool)
 	rtp.maxStandings = maxStandings
 	rtp.actors = make(map[Actor]bool)
-	rtp.workers = make([]ActorRuntime, maxStandings/2+1)
-	rtp.freeWorkers = make(chan ActorRuntime)
+	rtp.workers = make([]ActorRuntime, maxStandings)
+	rtp.activeWorkers = 0
+	rtp.freeWorkers = make(chan ActorRuntime, maxStandings)
 
 	return rtp
 }
@@ -409,11 +413,12 @@ func (this *OneForMulActorRuntimePool) receive(msg Message, actor Actor) {
 
 func (this *OneForMulActorRuntimePool) add(actor Actor) {
 	if _, exists := this.actors[actor]; !exists {
-		this.actors[actor] = true
-		if len(this.actors) < this.maxStandings {
+		if this.activeWorkers < this.maxStandings {
 			// create a new worker
-			this.workers = append(this.workers, NewSharedActorRuntime(this.freeWorkers))
+			this.workers[this.activeWorkers] = NewSharedActorRuntime(this.freeWorkers)
+			this.activeWorkers += 1
 		}
+		this.actors[actor] = true
 	}
 }
 
