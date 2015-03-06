@@ -8,10 +8,41 @@ import (
 	"time"
 )
 
-// TODO test Dispatcher
 func TestDefaultDispatcher(t *testing.T) {
 	dis := NewDefaultDispatcher()
+	sleeper1 := new(sleeper)
+	sleeper1.sleepTime = 50 * time.Millisecond
+	sleeper1.received = make(chan Message, 4)
 
+	sleeper2 := new(sleeper)
+	sleeper2.sleepTime = 50 * time.Millisecond
+	sleeper2.received = make(chan Message, 4)
+
+	dis.register(sleeper1)
+	dis.register(sleeper2)
+
+	go dis.start()
+	time.Sleep(200 * time.Millisecond)
+
+	msgsCnt := []string{"m1", "m2", "m3", "m4"}
+	msgs := make([]Message, len(msgsCnt))
+	for i, s := range msgsCnt {
+		msgs[i] = &msg{s}
+	}
+
+	dis.offer(msgs[0], sleeper1)
+	dis.offer(msgs[1], sleeper2)
+	dis.offer(msgs[2], sleeper1)
+	dis.offer(msgs[3], sleeper2)
+
+	m := <-sleeper1.received
+	assertStringEquals(t, "m1", m.id())
+	m = <-sleeper1.received
+	assertStringEquals(t, "m3", m.id())
+	m = <-sleeper2.received
+	assertStringEquals(t, "m2", m.id())
+	m = <-sleeper2.received
+	assertStringEquals(t, "m4", m.id())
 }
 
 func TestOneForMulActorRuntimePool(t *testing.T) {
@@ -281,11 +312,26 @@ func TestOneForOneActorRuntimePool(t *testing.T) {
 
 // helpers
 
+// an empty struct that does nothing but implements Actor interface
+// except the receive method. In other words, it is an "abstract" class
+type baseActor struct {
+	DefaultActorLifeCycle
+}
+
+func (this *baseActor) context() ActorContext {
+	return nil
+}
+
+func (this *baseActor) supervisorStrategy() SupervisorStrategy {
+	return nil
+}
+
 func enableFmtImport() {
 	fmt.Println("")
 }
 
 type sleeper struct {
+	baseActor
 	sleepTime time.Duration
 	received  chan Message
 }
@@ -296,6 +342,7 @@ func (this *sleeper) receive(msg Message) {
 }
 
 type reverser struct {
+	baseActor
 	received chan string
 }
 
@@ -313,6 +360,7 @@ func reverse(s string) string {
 }
 
 type echor struct {
+	baseActor
 	received chan Message
 }
 

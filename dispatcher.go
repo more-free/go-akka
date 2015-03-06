@@ -10,12 +10,17 @@ type Message interface {
 	id() string
 }
 
+// all methods in Actor are invisiable to outside world
+// there is no way to change an actor's internal state
+// except by passing messages through its ActorRef
 type Actor interface {
-	receive(msg Message)
-	//context() ActorContext
+	ActorBehaivor
+	ActorLifeCycle
+
+	context() ActorContext
+	supervisorStrategy() SupervisorStrategy
 }
 
-// no direct operations. all operations are delegated to ActorRef
 type ActorBehaivor interface {
 	receive(msg Message)
 }
@@ -29,6 +34,11 @@ type ActorLifeCycle interface {
 	postStop()
 }
 
+type SupervisorStrategy interface {
+	// TODO
+	processFailure()
+}
+
 type DefaultActorLifeCycle struct{}
 
 func (this *DefaultActorLifeCycle) preStart()    {}
@@ -38,38 +48,51 @@ func (this *DefaultActorLifeCycle) preStop()     {}
 func (this *DefaultActorLifeCycle) postStop()    {}
 
 // hold an actor implicitly
-//
 type ActorRef interface {
-	send(msg Message)
-	actorOf(prop Prop) ActorRef
-	// add become(cxt ActorContext) and unbecome(bool discardOld)
+	path() ActorPath
+	tell(msg Message) // send message to the actor it represents
+	forward(msg Message, sender ActorRef)
+
+	// compareTo, equals, hashCode, toString
 }
 
-type Prop interface {
-	path() string // unique in the same actor system
+type ActorPath interface {
+}
+
+type Props interface {
 	// add other fields here ..
 }
 
 type ActorContext interface {
+	// create an child actor and add it to ActorSystem
+	actorOf(props Props, name string) ActorRef
 	dispatcher() Dispatcher
 	parent() ActorRef
 	children() []ActorRef
-	props() Prop
+	props() Props
 	self() ActorRef
-	sender() ActorRef
+	sender() ActorRef // ref to the sender of the last message
 	system() ActorSystem
 	stop(actor ActorRef)
+	become(behaivor ActorBehaivor, discardOld bool)
+	unbecome()
+	watch(subject ActorRef)
+	unwatch(subject ActorRef)
+
+	actorFor(path string) // look for actor given a path
 }
 
 type ActorSystem interface {
 	// actor events
-	add(actor *ActorRef)
-	remove(actor *ActorRef)
+	add(actor Actor)
+	remove(actor Actor)
 
 	// for actor-related events(add, remove, etc.), registered listeners
 	// should be invoked synchronously
 	addListener(listener *ActorEventListener)
 	removeListener(listener *ActorEventListener)
+
+	bind(dispatcher Dispatcher)
 }
 
 type ActorEvent struct {
@@ -485,7 +508,8 @@ type Dispatcher interface {
 	// TODO add more APIs
 	register(actor Actor)
 	unregister(actor Actor)
-	start()
+	offer(msg Message, actor Actor) // usually non-blocking
+	start()                         // block current thread
 	stop()
 }
 
@@ -515,10 +539,14 @@ func (this *DefaultDispatcher) unregister(actor Actor) {
 	this.runtimePool.remove(actor)
 }
 
+func (this *DefaultDispatcher) offer(msg Message, actor Actor) {
+	this.messageQueue.offer(msg, actor)
+}
+
 func (this *DefaultDispatcher) start() {
 	this.monitorState()
 	this.state = "started"
-	
+
 	for !this.isStopped() {
 		msg, actor := this.messageQueue.poll()
 		this.runtimePool.receive(msg, actor)
@@ -528,18 +556,18 @@ func (this *DefaultDispatcher) start() {
 func (this *DefaultDispatcher) monitorState() {
 	go func() {
 		for {
-			this.state = <- this.stateTransfer
+			this.state = <-this.stateTransfer
 			if this.isStopped() {
 				break
 			}
 		}
-	}
+	}()
 }
 
 func (this *DefaultDispatcher) stop() {
 	this.stateTransfer <- "stop"
 }
 
-func (this *DefaultDispatcher) isStopped() {
+func (this *DefaultDispatcher) isStopped() bool {
 	return strings.EqualFold("stopped", this.state)
 }
