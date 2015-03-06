@@ -2,6 +2,7 @@ package akka
 
 import (
 	"container/list"
+	"strings"
 	"sync"
 )
 
@@ -296,6 +297,7 @@ func (this *OneForOneMessageQueue) notify(actor Actor) {
 
 type ActorRuntimePool interface {
 	// invoke actor's receive(Message) inside the runtime
+	// an Actor must be added by invoking add() first
 	receive(msg Message, actor Actor)
 
 	add(actor Actor)
@@ -479,15 +481,65 @@ func (this *DefaultActorRuntime) stop() {
 	this.channel <- &ActorRuntimeMessage{nil, nil}
 }
 
-type Dispatcher struct {
-	messageQueue ActorMessageQueue
-	runtime      ActorRuntimePool
-	stop         bool
+type Dispatcher interface {
+	// TODO add more APIs
+	register(actor Actor)
+	unregister(actor Actor)
+	start()
+	stop()
 }
 
-func (this *Dispatcher) start() {
-	for !this.stop {
-		msg, actor := this.messageQueue.poll()
-		this.runtime.receive(msg, actor)
+// an experimental dispatcher for demo purpose
+type DefaultDispatcher struct {
+	messageQueue ActorMessageQueue
+	runtimePool  ActorRuntimePool
+
+	stateTransfer chan string // TODO add a complete FSM
+	state         string
+}
+
+func NewDefaultDispatcher() Dispatcher {
+	return &DefaultDispatcher{
+		NewSharedMessageQueue(1024 * 5),
+		NewOneForMulActorRuntimePool(500),
+		make(chan string),
+		"init",
 	}
+}
+
+func (this *DefaultDispatcher) register(actor Actor) {
+	this.runtimePool.add(actor)
+}
+
+func (this *DefaultDispatcher) unregister(actor Actor) {
+	this.runtimePool.remove(actor)
+}
+
+func (this *DefaultDispatcher) start() {
+	this.monitorState()
+	this.state = "started"
+	
+	for !this.isStopped() {
+		msg, actor := this.messageQueue.poll()
+		this.runtimePool.receive(msg, actor)
+	}
+}
+
+func (this *DefaultDispatcher) monitorState() {
+	go func() {
+		for {
+			this.state = <- this.stateTransfer
+			if this.isStopped() {
+				break
+			}
+		}
+	}
+}
+
+func (this *DefaultDispatcher) stop() {
+	this.stateTransfer <- "stop"
+}
+
+func (this *DefaultDispatcher) isStopped() {
+	return strings.EqualFold("stopped", this.state)
 }

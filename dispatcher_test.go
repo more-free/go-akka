@@ -9,6 +9,10 @@ import (
 )
 
 // TODO test Dispatcher
+func TestDefaultDispatcher(t *testing.T) {
+	dis := NewDefaultDispatcher()
+
+}
 
 func TestOneForMulActorRuntimePool(t *testing.T) {
 	testForOneActor(t)
@@ -289,6 +293,23 @@ type sleeper struct {
 func (this *sleeper) receive(msg Message) {
 	time.Sleep(this.sleepTime)
 	this.received <- msg
+}
+
+type reverser struct {
+	received chan string
+}
+
+func (this *reverser) receive(msg Message) {
+	this.received <- reverse(msg.id())
+}
+
+// from https://github.com/golang/example/blob/master/stringutil/reverse.go
+func reverse(s string) string {
+	r := []rune(s)
+	for i, j := 0, len(r)-1; i < len(r)/2; i, j = i+1, j-1 {
+		r[i], r[j] = r[j], r[i]
+	}
+	return string(r)
 }
 
 type echor struct {
