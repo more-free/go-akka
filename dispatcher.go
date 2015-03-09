@@ -52,15 +52,20 @@ type ActorRef interface {
 	path() ActorPath
 	tell(msg Message) // send message to the actor it represents
 	forward(msg Message, sender ActorRef)
-
+	
+	// TODO should this context field private
+	// ActorRef and Actor must point to the same ActorContext 
+	// context() ActorContext 
+	
 	// compareTo, equals, hashCode, toString
 }
 
 type ActorPath interface {
 }
 
+// TODO explore some reflection solution in go 
 type Props interface {
-	// add other fields here ..
+	build() Actor
 }
 
 type ActorContext interface {
@@ -79,36 +84,58 @@ type ActorContext interface {
 	watch(subject ActorRef)
 	unwatch(subject ActorRef)
 
-	actorFor(path string) // look for actor given a path
+	actorFor(path string) ActorRef // look for actor given a path
+}
+
+type DefaultActorContext struct {
+	
+}
+
+// 1. create the actor instance internally
+// 2. add it to ActorSystem (and then Dispatcher)
+// 3. call preStart() hook (before starting receiving any message)
+// 4. return ActorRef (enable receiving messages)
+func (this *DefaultActorContext) actorOf(props Props, name string) ActorRef {
+	// create the actor instance
+	actor := props.build()
+	// add the ActorSystem
+	
 }
 
 type ActorSystem interface {
-	// actor events
-	add(actor Actor)
+	// TODO should keep all methods that directly interact with actors private
+	add(actor Actor, name string)
 	remove(actor Actor)
+
+	actorFor(path string) ActorRef
 
 	// for actor-related events(add, remove, etc.), registered listeners
 	// should be invoked synchronously
-	addListener(listener *ActorEventListener)
-	removeListener(listener *ActorEventListener)
+	addListener(listener ActorEventListener)
+	removeListener(listener ActorEventListener)
 
 	bind(dispatcher Dispatcher)
 }
 
-type ActorEvent struct {
-	name string
+type ActorEvent interface {
+	eventType() ActorEventType
 }
 
-type ActorAddedEvent struct {
-	ActorEvent
-}
+type ActorEventType int
 
-type ActorRemovedEvent struct {
-	ActorEvent
+const (
+	_ ActorEventType = iota
+	ADD
+	REMOVE
+)
+
+const namesActorEventType = []string{
+	ADD : "ADD"
+	REMOVE : "REMOVE"
 }
 
 type ActorEventListener interface {
-	do(event *ActorEvent)
+	handle(event ActorEvent)
 }
 
 // TODO separate queue structure (one shared queue, multiple queues, etc.)
