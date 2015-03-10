@@ -48,6 +48,7 @@ func (this *DefaultActorLifeCycle) preStop()     {}
 func (this *DefaultActorLifeCycle) postStop()    {}
 
 // hold an actor implicitly
+// the main purpose of ActorRef is, location transparency and auto failover
 type ActorRef interface {
 	path() ActorPath
 	tell(msg Message) // send message to the actor it represents
@@ -83,32 +84,24 @@ type ActorContext interface {
 }
 
 type ActorSystem interface {
-	// actor events
 	add(actor Actor)
 	remove(actor Actor)
+	actorFor(path string)
 
 	// for actor-related events(add, remove, etc.), registered listeners
 	// should be invoked synchronously
-	addListener(listener *ActorEventListener)
-	removeListener(listener *ActorEventListener)
+	addListener(listener ActorEventListener)
+	removeListener(listener ActorEventListener)
 
 	bind(dispatcher Dispatcher)
 }
 
-type ActorEvent struct {
-	name string
-}
-
-type ActorAddedEvent struct {
-	ActorEvent
-}
-
-type ActorRemovedEvent struct {
-	ActorEvent
+type ActorEvent interface {
+	eventType() string
 }
 
 type ActorEventListener interface {
-	do(event *ActorEvent)
+	handle(event ActorEvent)
 }
 
 // TODO separate queue structure (one shared queue, multiple queues, etc.)
