@@ -315,15 +315,15 @@ func TestOneForOneActorRuntimePool(t *testing.T) {
 // an empty struct that does nothing but implements Actor interface
 // except the receive method. In other words, it is an "abstract" class
 type baseActor struct {
-	DefaultActorLifeCycle
+	DefaultActor
 }
 
 func (this *baseActor) context() ActorContext {
 	return nil
 }
 
-func (this *baseActor) supervisorStrategy() SupervisorStrategy {
-	return nil
+func (this *baseActor) setContext(cxt ActorContext) {
+
 }
 
 func enableFmtImport() {
