@@ -175,33 +175,36 @@ func (this *DefaultActorContext) props() Props {
 }
 
 func (this *DefaultActorContext) dispatcher() Dispatcher {
-	return this.system().getDispatcher()
+	return this.system().dispatcher()
 }
 
 func (this *DefaultActorContext) actorOf(props Props, name string) ActorRef {
-	// create the actor instance
-	actor := props.build()
+	/*
+		// create the actor instance
+		actor := props.build()
 
-	// combine with basic actor Behaivor
+		// combine with basic actor Behaivor
 
-	// overwrite its context
-	actor.setContext(this.createContext()) // TODO
+		// overwrite its context
+		actor.setContext(this.createContext()) // TODO
 
-	// add the ActorSystem. after this, the actor is ready in the
-	// dispatcher of the actor system, but since its ActorRef has
-	// not been returned to the caller, there is no way to send message
-	// to the actor. So it is safe to invoke preStart hook after adding
-	// it to actor system.
-	actorRef, _ := actor.context().system().put(actor, []string{name})
+		// add the ActorSystem. after this, the actor is ready in the
+		// dispatcher of the actor system, but since its ActorRef has
+		// not been returned to the caller, there is no way to send message
+		// to the actor. So it is safe to invoke preStart hook after adding
+		// it to actor system.
+		actorRef, _ := actor.context().system().put(actor, []string{name})
 
-	// add the newly created actor as children
-	this.addChild(actorRef)
+		// add the newly created actor as children
+		this.addChild(actorRef)
 
-	// call preStart hook
-	actor.preStart()
+		// call preStart hook
+		actor.preStart()
 
-	// return to caller and be ready to receive messages
-	return actorRef
+		// return to caller and be ready to receive messages
+		return actorRef
+	*/
+	return nil
 }
 
 func (this *DefaultActorContext) createContext() ActorContext {

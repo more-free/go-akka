@@ -5,31 +5,79 @@ import (
 	"fmt"
 )
 
+type ActorBuilder func() Actor
+
 type ActorSystem interface {
-	// TODO should keep all methods that directly interact with actors private
 	TreeStore
 
+	// TODO
 	// for actor-related events(add, remove, etc.), registered listeners
 	// should be invoked synchronously
-	addListener(listener ActorEventListener)
-	removeListener(listener ActorEventListener)
+	//addListener(ActorEventListener)
+	//removeListener(ActorEventListener)
 
-	bind(dispatcher Dispatcher)
-	getDispatcher() Dispatcher
+	dispatcher() Dispatcher
+	setDispatcher(Dispatcher)
+
+	// create a top-level actor without supervisor
+	ActorOf(builder ActorBuilder, name string) (ActorRef, error)
+	// create a non top-level actor with given supervisor
+	actorOf(builder ActorBuilder, name string, supervisorPath ActorPath) (ActorRef, error)
+
+	Lookup(ActorPath) (ActorRef, error)
+
+	// Remove(ActorPath) error
 }
 
+type DefaultActorSystem struct {
+	TreeStore
+	Dispatcher
+}
+
+func (t *DefaultActorSystem) ActorOf(builder ActorBuilder, name string) (ActorRef, error) {
+	path := []string{name}
+	unit, err := t.get(path)
+	if unit != nil {
+		return nil, fmt.Errorf("Actor %v already exists. Consider using Lookup(ActorPath) to get its reference", name)
+	} else if err != nil {
+		return nil, err
+	}
+
+	unit = &actorUnit{builder(), builder, name}
+	err = t.put(unit, path)
+	if err != nil {
+		return nil, err
+	}
+	return t.createRef(unit, path), nil
+}
+
+// TODO more on this later
+func (t *DefaultActorSystem) createRef(unit *actorUnit, path ActorPath) ActorRef {
+	return &LocalActorRef{unit.actor, path}
+}
+
+// storage unit used by ActorSystem
+type actorUnit struct {
+	actor   Actor
+	builder ActorBuilder
+	name    string
+}
+
+// storage structure used by ActorSystem internally. no public APIs
 type TreeStore interface {
 	// return error if the given actor path already exists
-	put(actor Actor, path ActorPath) (ActorRef, error)
+	put(unit *actorUnit, path ActorPath) error
 
 	// return error of the given actor path doesn't exist
-	get(path ActorPath) (ActorRef, error)
+	get(path ActorPath) (*actorUnit, error)
 
 	// return error if the given actor path doesn't exist
-	getChildren(path ActorPath) ([]ActorRef, error)
+	// otherwise return direct children only
+	// if len(path) == 0, return all top-level units
+	getChildren(path ActorPath) ([]*actorUnit, error)
 
 	// return error if the given actor path doesn't exist
-	getParent(path ActorPath) (ActorRef, error)
+	getParent(path ActorPath) (*actorUnit, error)
 
 	// if recursive == false, then return error if the actor has children;
 	// otherwise, delete all children and the actor itself
@@ -37,7 +85,7 @@ type TreeStore interface {
 }
 
 type TreeNode struct {
-	actor    Actor
+	unit     *actorUnit
 	children map[string]*TreeNode
 }
 
@@ -47,13 +95,14 @@ type DefaultTreeStore struct {
 	root *TreeNode
 }
 
+// TODO to implement
 type LocalActorRef struct {
 	Actor
-	ActorPath
+	actorPath ActorPath
 }
 
 func (t *LocalActorRef) path() ActorPath {
-	return nil
+	return t.actorPath
 }
 
 // send message to the actor it represents
@@ -70,18 +119,18 @@ func NewDefaultTreeStore() TreeStore {
 	return new(DefaultTreeStore)
 }
 
-func (t *DefaultTreeStore) put(actor Actor, path ActorPath) (ActorRef, error) {
+func (t *DefaultTreeStore) put(unit *actorUnit, path ActorPath) error {
 	if _, err := t.get(path); err == nil {
-		return nil, fmt.Errorf("actor %v already exists", path)
+		return fmt.Errorf("actor %v already exists", path)
 	}
 
-	var addHelper func(*TreeNode, Actor, ActorPath) *TreeNode
-	addHelper = func(root *TreeNode, actor Actor, path ActorPath) *TreeNode {
+	var addHelper func(*TreeNode, *actorUnit, ActorPath) *TreeNode
+	addHelper = func(root *TreeNode, unit *actorUnit, path ActorPath) *TreeNode {
 		if root == nil {
 			root = new(TreeNode)
 		}
 		if len(path) == 0 {
-			root.actor = actor
+			root.unit = unit
 		} else {
 			if root.children == nil {
 				root.children = make(map[string]*TreeNode)
@@ -91,48 +140,99 @@ func (t *DefaultTreeStore) put(actor Actor, path ActorPath) (ActorRef, error) {
 			if !exists {
 				child = nil
 			}
-			root.children[path[0]] = addHelper(child, actor, path[1:])
+			root.children[path[0]] = addHelper(child, unit, path[1:])
 		}
 		return root
 	}
 
-	t.root = addHelper(t.root, actor, path)
+	t.root = addHelper(t.root, unit, path)
 	t.size += 1
-	return &LocalActorRef{actor, path}, nil
+	return nil
 }
 
-func (t *DefaultTreeStore) get(path ActorPath) (ActorRef, error) {
-	var getHelper func(*TreeNode, ActorPath) *TreeNode
-	getHelper = func(root *TreeNode, path ActorPath) *TreeNode {
-		if root == nil {
-			return nil
-		}
-		if len(path) == 0 {
-			return root
-		}
-		child, exists := root.children[path[0]]
-		if !exists {
-			child = nil
-		}
-		return getHelper(child, path[1:])
-	}
-
-	node := getHelper(t.root, path)
+func (t *DefaultTreeStore) get(path ActorPath) (*actorUnit, error) {
+	node := t.getNode(t.root, path)
 	if node == nil {
 		return nil, fmt.Errorf("actor %v doesn't exist", path)
 	} else {
-		return &LocalActorRef{node.actor, path}, nil
+		return node.unit, nil
 	}
 }
 
-func (t *DefaultTreeStore) getChildren(path ActorPath) ([]ActorRef, error) {
-	return nil, nil
+// a helper function
+func (t *DefaultTreeStore) getNode(root *TreeNode, path ActorPath) *TreeNode {
+	if root == nil {
+		return nil
+	}
+	if len(path) == 0 {
+		return root
+	}
+	child, exists := root.children[path[0]]
+	if !exists {
+		child = nil
+	}
+	return t.getNode(child, path[1:])
 }
 
-func (t *DefaultTreeStore) getParent(path ActorPath) (ActorRef, error) {
-	return nil, nil
+// return all direct children
+func (t *DefaultTreeStore) getChildren(path ActorPath) ([]*actorUnit, error) {
+	node := t.getNode(t.root, path)
+	if node == nil {
+		return nil, fmt.Errorf("actor %v doesn't exist", path)
+	} else {
+		children := make([]*actorUnit, 0)
+		for _, v := range node.children {
+			if v.unit != nil {
+				children = append(children, v.unit)
+			}
+		}
+		return children, nil
+	}
+}
+
+func (t *DefaultTreeStore) getParent(path ActorPath) (*actorUnit, error) {
+	node := t.getNode(t.root, path)
+	if node == nil {
+		return nil, fmt.Errorf("actor %v doesn't exist", path)
+	}
+
+	parent := t.getNode(t.root, path[0:len(path)-1])
+	if parent == nil {
+		return nil, fmt.Errorf("parent %v doesn't exist", path[0:len(path)-1])
+	} else {
+		return parent.unit, nil
+	}
 }
 
 func (t *DefaultTreeStore) remove(path ActorPath, recursive bool) error {
+	node := t.getNode(t.root, path)
+	if node == nil {
+		return fmt.Errorf("actor %v doesn't exist", path)
+	}
+
+	if !recursive {
+		if node.children != nil && len(node.children) > 0 {
+			return fmt.Errorf("failed to delete actor %v because it has children", path)
+		}
+	}
+
+	// delete children recursively
+	if recursive {
+		for k, _ := range node.children {
+			err := t.remove(append(path, k), recursive)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// delete self from parent
+	parent := t.getNode(t.root, path[0:len(path)-1])
+	delete(parent.children, path[len(path)-1])
+	if len(parent.children) == 0 {
+		parent.children = nil
+	}
+	t.size -= 1
+
 	return nil
 }
